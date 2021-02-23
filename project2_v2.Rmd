@@ -1,0 +1,402 @@
+---
+title: "Project 2: Survival Analysis of VA Lung Cancer Dataset"
+author: "Neil Scheidwasser-Clow"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+#abstract: "Lung cancer is among both the most common and deadly forms of cancer. In trials for new potential cancer treatments, survival analyses are conducted to study how the studied treatments or other risk factors affect the probability of survival over time. In this project, we analysed the trial of two chemotherapies for lung cancer realized by the Veterans Administration on 137 male patients. Using Cox regression models, we found that these treatments did not statistically differ at a significance level of 0.05. Among the proposed risk factors, models based only on the Karnofsky Performance Status seemed to be sufficient to fit accurately the survival data."
+output:
+  pdf_document: 
+    fig_caption: yes
+    keep_tex: yes
+    number_sections: yes
+  keep_tex: yes
+  fontsize: 12 pt
+header-includes:
+   - \usepackage{dcolumn} 
+   - \usepackage{float}
+   - \usepackage[font=small,skip=0pt]{caption}
+   - \newcommand*{\secref}[1]{\ref{#1}}
+bibliography: bibliography.bib
+csl: ieee.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(ggfortify)
+library(dplyr)
+library(ggpubr)
+library(gridExtra)
+library(stargazer)
+library(xtable)
+library(pander)
+library(ggcorrplot)
+```
+
+\setlength{\textfloatsep}{5pt}
+
+\vspace{-5mm}
+# Introduction
+\label{intro}
+Cancer is the second cause of death in the United States and in the world [@ritchie2020]. Although declining, lung cancer remains the deadliest form of cancer for both men and women [@roser2020]. The most frequent symptoms include dyspnea (i.e. shortness of breath), constant coughing and weight loss [@longo2012]. Generally speaking, lung cancers are first divided by tumour cell size. Tumour cells of small-cell lung carcinomas (SCLC) appear smaller than those of non-small-cell lung carcinomas [@alberg2003] [@zappa2016] [@kalbfleisch1980]. In the latter category, three subtypes are typically distinguished by cell appearance. While adenocarnicoma tumours have a glandular structure, squamous-cell carcinoma have flatter cells. Finally, large-cell carcinoma cells are simply larger than normal cells.
+
+To get a deeper understanding of such chronic diseases, it is of significant importance to investigate the influence of risk factors. While most analyses tend to focus on disease epidemiology, similar studies can be conducted to evaluate current treatments or clinical trials. In this project, we examined the trial from the Veterans Administration of two treatment regimens for lung cancer [@kalbfleisch1980] [@prentice1973]. Although the main interest was to investigate differences between both treatment protocols, the importance of the following auxiliary variables was assessed: type of cancer (among the four types described above), age, functional ability [@karnofsky1949], number of months from diagnosis to entry (or diagnostic-entry interval, DEI), and the existence of prior treatment.
+
+For this survival analysis, exploratory data analysis was first performed to examine the main characteristics of the dataset. Given that some individuals were censored, standard regression procedures could not apply to analyse the dataset of interest. Thus, Kaplan-Meier estimates were first used to analyse differences in survival for the two therapies at stake. To investigate further the trial data, the model was enriched with the other risk factors, and Cox regression was performed to fit the hazard function of the resulting model. For all statistical tests, a significance level of $0.05$ was used.
+
+\vspace{-5mm}
+# Data 
+\label{data}
+In the experiment led by the Veterans Administration Lung Cancer Study Group [@kalbfleisch1980], 137 male cancer patients were randomized to a standard or a test chemotherapy protocol. The response variable is the survival time (or censoring time for censored individuals), expressed in days. The corresponding event is whether an individual was dead or censored. Subsidiary quantitative risk factors include age (in years), duration between diagnosis and entry (DEI, in months), and the Karnofsky Performance Status (KPS). The latter, expressed in \%, evaluates the functional abilities of cancer patients. 100\% indicates normal function, with no visible symptoms, whereas 0\% corresponds to death. Finally, both the lung cancer type (adenocarcinoma, small-cell, large-cell or squamous-cell) and the existence of prior treatment (yes or no) were grouping factors of the dataset.
+
+# Exploratory data analysis
+
+```{r load_data, echo=FALSE}
+dat = read.csv("valung.csv", header=TRUE)
+
+levels(dat$dead) <- c(0, 1)
+#levels(dat$therapy) <- c(1, 2)
+levels(dat$prior) <- c(0, 10)
+
+dat$dead <- as.numeric(dat$dead) - 1
+```
+```{r EDA_functions, echo=FALSE}
+boxplot_ <- function(data, col, label, title) {
+  return(ggplot(data, aes(x = factor(0), y = col, group=1)) +
+    geom_boxplot() +
+    ylab(label) +
+    ggtitle(title) +
+    theme_bw() +
+    theme(plot.title = element_text(size = 9),
+          axis.title.x = element_blank(),
+          axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.title.y = element_text(size = 9)))
+}
+
+hist_ <- function(dat, xlabel, categories) {
+  if(missing(categories)) {
+    categories = unique(dat)
+  }
+  quantities = table(dat)
+  return(ggplot(data.frame(categories, quantities), aes(x = categories, y = quantities)) +
+    geom_bar(stat = "identity") + 
+    xlab(xlabel) + 
+    ylab("# patients"))
+}
+```
+
+```{r boxplot & hist creation, echo=FALSE}
+bp1 <- boxplot_(dat, dat$age, "Age (years)", "Age")
+bp2 <- boxplot_(dat, dat$kps, "KPS", "KPS")
+bp3 <- boxplot_(dat, dat$t, "Failure/censoring time (days)", "Time")
+bp4 <- boxplot_(dat, dat$diagtime, "Diagnostic-Entry interval (months)", "Diagnostic-Entry interval")
+
+hist1 <- hist_(dat$cell, "Cell")
+hist2 <- hist_(dat$therapy, "Therapy")
+hist3 <- hist_(dat$dead, "Status", c("Censored", "Dead"))
+hist4 <- hist_(dat$prior, "Prior", c("No", "Yes"))
+```
+
+Boxplots were realized for quantitative variables (age, KPS, failure (or censoring) time and time from diagnostic to entry). As can be seen in Figure \ref{fig::EDA-box}, median age of participants was 63 years. The skewness of age distribution indicated that older patients were more represented. In contrast, Karnofsky index data was fairly equally distributed. Finally, both failure time and DEI contained numerous outliers. One can note that all these outliers originated from non-censored trials that did not include adenocarcinoma. While half of outliers from failure time data occurred in squamous-cell cancer trials (six with tested therapy, two with standard therapy), outliers from DEI data equally appeared in squamous- and small-cell lung cancers (two with standard, two with test therapy for each cell).
+
+```{r Boxplots, echo = FALSE, fig.height = 4, fig.width = 10, fig.cap = "\\label{fig::EDA-box} Boxplots of quantitative variables: age, KPS, survival time, and diagnostic-entry interval.", fig.scap = NA}
+grid.arrange(bp1, bp2, bp3, bp4, nrow = 1)
+```
+
+\vspace{5mm}
+Categorical variables (type of cancer, type of therapy, status and existence of prior treatment) were analysed using histograms. As shown in Figure \ref{fig::EDA-hist}, the trial comprised less patients with small- and squamous-cell carcinomas. Besides, more than two-thirds of patients had no prior treatment before the trial. Given that less than 10\% of patients were censored, one could choose to ignore censored data to perform linear or logistic regression. That said, discarding censored data could bias the analysis.
+
+```{r Hist, echo = FALSE, warning=FALSE, message=FALSE, fig.height = 4, fig.width = 10, fig.cap = "\\label{fig::EDA-hist} Histograms of categorical variables: type of cancer, type of therapy, status, and existence of prior treatment.", fig.scap = NA}
+grid.arrange(hist1, hist2, hist3, hist4, nrow = 1)
+```
+
+\vspace{5mm}
+Following univariate data analysis, quantitative variables were also analysed in a bivariate fashion, both through their correlation matrix (Figure \ref{fig::bivariate}) and scatter plots (Figure \ref{fig::bivariate_scat}). The correlation coefficients $r_{ij}$ in the matrix are a measure of linear association between two variables. While $r_{ij} \approx \pm 1$ indicates a linear correlation, $r_{ij} \approx \pm 0$ denotes no linear association. In this dataset, no linear association arose between the quantitative variables of interest (maximum correlation was between KPS and time, $r = 0.38$). The scatter plots confirmed the nonlinear depenencies found in the correlation matrix. For each graph, bivariate points were generally stacked around a single region, excepting plots where KPS is the explanatory variable (as KPS is an ordinal discrete variable).
+
+```{r bivariate, echo=F, fig.align="center", fig.height = 2, fig.width = 3, fig.cap = "\\label{fig::bivariate} Correlation matrix of quantitative varirables from the dataset: age, KPS, survival time, and diagnostic-entry interval.", fig.scap = NA}
+chosen <- c("t", "kps", "diagtime", "age")
+cormat <- cor(dat[,colnames(dat) %in% chosen], method="pearson")
+ggcorrplot(cormat, hc.order=T, type="lower", lab=T, lab_size=3, tl.cex=8)
+```
+
+\vspace{-1cm}
+```{r bivariate_scat, echo=F, fig.align="center", fig.height = 3, fig.width = 5, fig.cap = "\\label{fig::bivariate_scat} Scatter plots of quantitative varirables from the dataset: survival time, KPS, age, KPS, and diagnostic-entry interval (DEI).", fig.scap = NA}
+pairs(dat[,colnames(dat) %in% chosen], labels=c("Failure/censor time \n (days)", "KPS", "DEI \n (days)", "Age \n (years)"))
+```
+
+# Survival analysis
+## Kaplan-Meier estimates
+
+To compare the effect of standard and test therapies over time, the survival function $S(t)$ is typically studied:
+
+\vspace{-1mm}
+\begin{equation} \label{eq:surv}
+  S(t) = Pr(T > t) = 1 - F(t),
+\end{equation}
+
+where T is a continuous random variable, and F its cumulative distribution function. As our data includes censoring, individual survival as a function of therapy modality was estimated using the Kaplan-Meier estimator:
+
+\vspace{-1mm}
+\begin{equation} \label{eq:KM}
+  \hat{S}(t) = \prod_{j:t(j) \leq t} \Big(1-\frac{d_j}{r_j}\Big),
+\end{equation}
+
+where $r_j$ is the number of individuals at risk just before $t(j)$ (including censored individuals at $t(j)$), and $d_j$ is the number of individuals experiencing the event at time $t(j)$. From Figure \ref{fig::first_KM}, one could argue that patients with the test therapy seemed to survive longer. Yet, the difference between standard and test therapy curves was not statistically significant (p = 0.93) following a log-rank test, whose null hypothesis was that the survival function for both therapies were identical.
+
+```{r survfit, echo = FALSE, message = FALSE, warnings=FALSE, fig.align="center", fig.height = 2.5, fig.width = 4, fig.cap = "\\label{fig::first_KM} Kaplan-Meier estimation of the survival function for standard and test therapies. Log-rank p-value between survival curves for both therapy modes: 0.93.", fig.scap = NA}
+dat.survfit <- survfit(Surv(t, dead) ~ therapy, data=dat)
+plot.first_KM <- autoplot(dat.survfit)
+plot.first_KM <- plot.first_KM + ylab("P(survival)") + xlab("time (days)") + annotate(geom="text", x = 750, y = 0.5, 
+                                                                label=paste("p =", toString(signif(1-pchisq(survdiff(Surv(t, dead) ~ therapy, data=dat)$chisq,1), digits=2)))) + annotate(geom="text", x = 750, y = 0.4, label='paste(chi, "² = ", 0, ", df = ", 1)', parse=T)
+plot.first_KM
+```
+
+A similar observation was found in Kaplan-Meier estimates stratified by cancer type or by the existence of prior treatment (Figure \ref{fig::KM_strat}). Although the survival curves had different patterns depending on the stratification level (e.g. it could seem that squamous-cell cancer patients survived longer with the test therapy, while small-cell cancer individuals had a longer survival time with the standard therapy), the differences between therapies in terms of survival time were not statistically significant according to log-rank tests. Once again, the null hypothesis for this test is that both therapies have the same survival function, which could not be rejected for all stratification levels at a level of 0.05.
+
+
+```{r KM_strat, echo=F, fig.align="center", fig.height = 4, fig.width = 7, fig.cap = "\\label{fig::KM_strat} Kaplan-Meier estimation of the survival function for standard and test therapies, stratified either by cancer type (adenocarcinoma) or by existence of prior treatment. Log-rank p-value between survival curves for both therapy modes: 0.93.", fig.scap = NA}
+dat.adeno <- subset(dat, cell=="Adeno")
+dat.squam <- subset(dat, cell=="Squamous")
+dat.large <- subset(dat, cell=="Large")
+dat.small <- subset(dat, cell=="Small")
+dat.prior0 <- subset(dat, prior==0)
+dat.prior10 <- subset(dat, prior==10)
+
+plotKM <- function(dat_, name, x_, label_) {
+  dat_.survfit <- survfit(Surv(t, dead) ~ therapy, data=dat_)
+  plot_ <- autoplot(dat_.survfit)
+  plot_  <- plot_ + ggtitle(name) +
+    theme(plot.title = element_text(size = 8, face = "bold"), axis.title=element_text(size=8,face="bold")) +xlim(0,1000) + xlab("time (days)") + ylab("P(survival)") + annotate(geom="text", x = x_, y = 0.85, size=3, label=paste("p =", toString(signif(1-pchisq(survdiff(Surv(t, dead) ~ therapy, data=dat_)$chisq,1), digits=2)))) + annotate(geom="text", x = x_, y = 0.65, size=3, label=label_, parse=T)
+  return(plot_)
+}
+
+grid.arrange(plotKM(dat.adeno, "Adeno", 700, 'paste(chi, "² = ", 0.2, ", df = ", 1)'), 
+             plotKM(dat.squam, "Squamous", 700, 'paste(chi, "² = ", 2.5, ", df = ", 1)'), 
+             plotKM(dat.large, "Large", 700, 'paste(chi, "² = ", 1.1, ", df = ", 1)'), 
+             plotKM(dat.small, "Small", 700, 'paste(chi, "² = ", 2.3, ", df = ", 1)'), 
+             plotKM(dat.prior0, "Prior=No", 700, 'paste(chi, "² = ", 1.1, ", df = ", 1)'), 
+             plotKM(dat.prior10, "Prior=Yes", 700, 'paste(chi, "² = ", 1.3, ", df = ", 1)'), 
+             nrow = 3)
+```
+
+That said, such a univariate model ignores the other risk factors described in Section \secref{intro}. Thus, the full dataset was fitted using Cox regression as a means to model the hazard function. This first model was denoted as the "full" model.
+
+## Cox proportional hazards model: "full" model
+Whereas the survival function denotes the probability of survival beyond a given time, the _hazard function_ $h$ characterizes the probability of failure in a small time interval $s$ over time _given survival_ until time $t$:
+
+\begin{equation} \label{eq:hazard}
+  h(t) = \lim_{s -> 0} \frac{P(t \leq T \leq t+s | T \geq t)}{s}
+\end{equation}
+
+By contrast with other regression techniques, Cox regression (Equation \ref{eq:coxph}) assumes linearity on the log hazard scale:
+
+\begin{equation} \label{eq:coxph}
+  h(t) = h_{0}(t) \exp\Bigg(\sum_{i=1}^{k} \beta_{i} x_{i}\Bigg)
+\end{equation}
+
+where $h$ is the hazard function estimate, $x_{i}$ the covariates of interest, $\beta_{i}$ the coefficient for covariate $x_{i}$, and $h_{0}$ the *baseline hazard function*, which describes the common shape of survival time distribution for all individuals. 
+
+For the "full" model, Cox regression fitting was statistically significant according to Wald, likelihood ratio and log-rank tests (p < 0.01) (Table \ref{tab::cox1}), which all evaluate the null hypothesis that all coefficients $\beta_i$ in Equation \ref{eq:coxph} are 0. In other words, the hypothesis that all coefficients $\beta_{i}$ were null could be rejected, meaning that the model was not meaningless. Despite the inclusion of other risk factors, the difference between test and standard therapies remained statistically insignificant. Likewise, DEI, age and receiving prior treatment were also not significant to predict the hazard function. Concerning cancer types, only individuals with squamous- and large-cell lung cancers were statistically different from adenocarcinoma patients. Note that no statistical difference appeared between squamous- and large-cell subgroups when one of them was the reference group. By contrast, the KPS covariate was revealed to be an important predictor of survival time.
+
+```{r coxph, echo=F, results="asis"}
+dat.coxph <- coxph(Surv(t, dead) ~ therapy + cell + age + prior + diagtime + kps,  data=dat)
+
+dat.coxph.s <- summary(dat.coxph)
+
+dat.labels <- c("Therapy (test vs. standard)", "Cell (large-cell vs. adenocarnicoma)", "Cell (small-cell vs. adenocarcinoma)", "Cell (squamous-cell vs. adenocarcinoma)", "Age", "Prior treatment (yes vs. no)", "DEI", "KPS")
+
+#stargazer(dat.coxph, dat.coxph, dat.coxph, dat.coxph, coef = c(list(dat.coxph.s$coefficients[rownames(dat.coxph.s$coefficients),1]),list(dat.coxph.s$coefficients[rownames(dat.coxph.s$coefficients), 3]),list(dat.coxph.s$coefficients[rownames(dat.coxph.s$coefficients), 4]),list(dat.coxph.s$coefficients[rownames(dat.coxph.s$coefficients), 5])), covariate.labels=dat.labels, dep.var.labels="$\\hat{\\beta}$", ci=T, ci.level=0.95, header=F, model.names=F,  report="vc", omit.stat=c("rsq", "max.rsq", "ll"), font.size="small", title="Summary of Cox regression fitting of the full model. For each covariate, estimated coefficient $\\hat{\\beta}$ and its 95\\% confidence interval are displayed. Log-rank test p-value between squamous- and large-cell cancer patients: $p = 0.40$.", label="tab::cox1")
+```
+
+\begin{table}[!htbp] \centering 
+  \caption{Summary of Cox regression fitting of the full model. For each covariate, estimated coefficient $\hat{\beta}$ and its 95\% confidence interval are displayed. Log-rank test p-value between squamous- and large-cell cancer patients: $p = 0.40$.} 
+  \label{tab::cox1} 
+\small 
+\begin{tabular}{@{\extracolsep{5pt}}lcccc} 
+\\[-1.8ex]\hline 
+\hline 
+\\[-1.8ex] & $\hat{\beta}$ & $SE(\hat{\beta})$ & $z$ & $Pr(>|z|)$\\ 
+\hline \\[-1.8ex] 
+ Therapy (test vs. standard) & 0.30 & 0.21 & 1.42 & 0.16 \\ 
+  & & & & \\ 
+ Cell (large-cell vs. adenocarnicoma) & $-$0.80 & 0.30 & $-$2.62 & 0.01 \\ 
+  & & & & \\ 
+ Cell (small-cell vs. adenocarcinoma) & $-$0.34 & 0.28 & $-$1.21 & 0.23 \\ 
+  & & & & \\ 
+ Cell (squamous-cell vs. adenocarcinoma) & $-$1.20 & 0.30 & $-$3.98 & 7.05e-05 *** \\ 
+  & & & & \\ 
+ Age & $-$0.01 & 0.01 & $-$0.94 & 0.35 \\ 
+  & & & & \\ 
+ Prior treatment (yes vs. no) & 0.07 & 0.23 & 0.31 & 0.76 \\ 
+  & & & & \\ 
+ DEI & 0.0001 & 0.01 & 0.01 & 0.99 \\ 
+  & & & & \\ 
+ KPS & $-$0.03 & 0.07 & $-$5.96 & 2.55e-09 *** \\ 
+  & & & & \\ 
+\hline \\[-1.8ex] 
+Observations & 137 & & & \\ 
+Wald Test (df = 8) & 62.37$^{***}$ & & & \\ 
+LR Test (df = 8) & 62.10$^{***}$ & & & \\ 
+Score (Logrank) Test (df = 8) & 66.74$^{***}$ & & & \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{4}{r}{$^{*}$p$<$0.1; $^{**}$p$<$0.05; $^{***}$p$<$0.01} \\ 
+\end{tabular} 
+\end{table} 
+
+Nonetheless, the "full" model does not satisfy the proportional hazards assumption ("Global" variable in Table \ref{tab::cox1_zph}). Indeed, the p-value subject to the proportional hazards test was under 0.05, meaning that the null hypothesis that the modelled hazard function was time-invariant could be rejected. In particular, both the cell type and the KPS variables also failed the proportional hazards test (p < 0.05). To observe more in detail the time-dependencies of the latter variables, the Schoenfeld residuals were examined. More specifically, the Schoenfeld resdiual of a covariate represents the difference between the observed and the expected covariate given the risk set at that time. From the residual plots in Figure \ref{fig:hellooo}, one can notably observe that the Karnofsky Performance Score had a strong effect during the first 100 days of the trial. On the other hand, the "cell" variable residuals evolved in a parabolic fashion instead of being time-invariant. Thus, variables were transformed in order to satisfy the proportional hazards assumption. As the latter covariate is categorical, a stratified analysis depending on cancer type was carried out. To reduce the effect of the Karnofsky factor for failure times, all continuous variables were log-transformed. This new stratified model was thus denoted as the "log model".
+
+```{r cox1_zph, echo=F, results="asis"}
+dat.zph <- cox.zph(dat.coxph)
+
+full.zph = as.data.frame(dat.zph$table)
+full.zph$df = as.character(full.zph$df)
+
+print(xtable(full.zph, digits=2, caption="Chi-square test of proportional hazards assumption of the full model. Null hypothesis: the variable (or model) is time-invariant. diagtime=DEI, chisq=Chi-square value, df=number of degrees of freedom, p=p-value.", label="tab::cox1_zph"), comment=F, caption.placement = "top", table.placement="H")
+```
+
+```{r cox1_scaledsch, echo=F, fig.height = 6, fig.width = 10, fig.cap = "\\label{fig:hellooo} Scaled Schoenfeld residuals of covariates from the full model over time. diagtime=DEI. For reference, the y=0 line is shown in red.", fig.scap = NA}
+par(mfrow=c(2,3))
+for (i in 1:6) {
+  f <- plot(dat.zph[i])
+  abline(0,0, col=2)
+}
+```
+
+## Cox proportional hazards model: "log model"
+Similarly to the "full" model, therapy mode, age, existence of prior treatment and diagnostic-entry time interval were not statisically significant in the "log" model (Table \ref{tab:datcox2}). Once again, the Karnofsky Performance Score was strongly significant. Overall, the model remained statistically significant against Wald, likelihood ratio and log-rank tests (p < 0.01), meaning that the null hypothesis that all coefficients $\beta_i$ were 0 could be rejected.
+
+```{r coxph2, echo=F, results="asis"}
+dat.coxph2 <- coxph(Surv(t, dead) ~ therapy + strata(cell) + log(age) + prior + log(diagtime) + log(kps), data=dat)
+dat.labels2 <- c("Therapy (test vs. standard)", "log(age)", "Prior treatment (yes vs. no)", "log(DEI)", "log(KPS)")
+
+dat.coxph2.s <- summary(dat.coxph2)
+
+#stargazer(dat.coxph2, dat.coxph2, dat.coxph2, dat.coxph2, covariate.labels=dat.labels2, model.names=F, column.separate=c(1,1), dep.var.labels="$\\hat{\\beta}$", coef = c(list(dat.coxph2.s$coefficients[rownames(dat.coxph2.s$coefficients),1]),list(dat.coxph2.s$coefficients[rownames(dat.coxph2.s$coefficients), 3]),list(dat.coxph2.s$coefficients[rownames(dat.coxph2.s$coefficients), 4]),list(dat.coxph2.s$coefficients[rownames(dat.coxph2.s$coefficients), 5])),se = list(dat.coxph2.s$coefficients[rownames(dat.coxph2.s$coefficients), 3]), omit.stat=c("rsq", "max.rsq", "ll"), report=('vc'), header=F, no.space = TRUE, title="Summary of Cox regression fitting of the log model. For each covariate, estimated coefficient $\\hat{\\beta}$ and its 95\\% confidence interval are displayed.", label="tab:datcox2")
+```
+
+\begin{table}[!htbp] 
+  \centering 
+  \caption{Summary of Cox regression fitting of the log model. For each covariate, estimated coefficient $\hat{\beta}$ and its 95\% confidence interval are displayed.} 
+  \label{tab:datcox2} 
+\begin{tabular}{@{\extracolsep{5pt}}lcccc} 
+\\[-1.8ex]\hline 
+\hline
+\\[-1.8ex] & $\hat{\beta}$ & $SE(\hat{\beta})$ & $z$ & $Pr(>|z|)$ \\ 
+\hline \\[-1.8ex] 
+ Therapy (test vs. standard) & 0.22 & 0.21 & 1.04 & 0.30 \\ 
+  log(age) & $-$0.73 & 0.52 & $-$1.34 & 0.16 \\ 
+  Prior treatment (yes vs. no) & 0.16 & 0.25 & 0.63 & 0.53 \\ 
+  log(DEI) & $-$0.02 & 0.13 & $-$0.14 & 0.89 \\ 
+  log(KPS) & $-$1.53 & 0.24 & $-$6.45 & 1.16e-10 *** \\ 
+ \hline \\[-1.8ex] 
+Observations & 137 & & & \\ 
+Wald Test (df = 5) & 43.96 $^{***}$ &  & & \\ 
+LR Test (df = 5) & 38.64 $^{***}$ & & & \\ 
+Score (Logrank) Test (df = 5) & 50.12 $^{***}$ & & & \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{4}{r}{$^{*}$p$<$0.1; $^{**}$p$<$0.05; $^{***}$p$<$0.01} \\ 
+\end{tabular} 
+\end{table} 
+
+For this stratified model, the proportional hazards assumption was valid. Indeed, the proportional hazards hypothesis could not be rejected for all covariates (Table \ref{tab::cox2_zph}). The p-value for the global test was also above the significance threshold (p = 0.11), meaning that the estimated hazard function could be deemed as constant over time (as all of its regressors also have a constant effect over time).
+
+```{r cox2_zph, echo=F, results="asis"}
+dat.zph2 <- cox.zph(dat.coxph2)
+
+log.zph = as.data.frame(dat.zph2$table)
+log.zph$df = as.character(log.zph$df)
+
+print(xtable(log.zph, digits=2, caption="Chi-square test of proportional hazards assumption of the log model. Null hypothesis: the variable (or model) is time-invariant. diagtime=DEI, chisq=Chi-square value, df=number of degrees of freedom, p=p-value.", label="tab::cox2_zph"), comment=F, caption.placement = "top", table.placement="htbp")
+```
+
+Given the numerous covariates that were statistically insignificant, the final step of this survival analysis aimed at optimizing the current model. To that end, backward elimination was performed as a means to model selection. Model selection was performed using the Akaike Information Criterion (AIC) [@akaike1974]:
+\vspace{-1mm}
+\begin{equation} \label{eq::AIC}
+  AIC = - 2 \log L + 2p
+\end{equation}
+
+This metric assures a good balance between model fit (characterized by the $-2 \log L$ term, with $L$ the maximum likelihood of the data using the model) and model simplicity (penalized by the $2p$ term, with $p$ the number of parameters of the model). In addition, likelihood ratio tests (LRT) tests were computed to ensure that the nested submodels were not statistically different from the initial "log" model. For this test, the null hypothesis is that the reduced model is true, whereas the alternative hypothesis is that the larger model is true. The statistic is given by
+\vspace{-1mm}
+\begin{equation} \label{eq::LRT}
+  LRT = - 2 \ln \frac{L_R}{L_F} \sim \chi^2_{df},
+\end{equation}
+
+where $L_R$ is the log-likelihood of the reduced model, $L_F$ the log-likelihood of the full model, and $df$ is the number of degrees of freedom.
+
+For this model selection scheme, the best cell-stratified model only comprised the KPS covariate. To compare the normal "log" and simplified "log" models, an analysis-of-deviance table was implemented as a means to examine differences in fit statistics, e.g. the log-likelihood of both models. From the analysis-of-deviance summary in Table \ref{anova_cox}, the initial "log" model had a higher AIC score than the submodel obtained via backward elimination. Thus, the latter model was preferred, as a lower relative AIC value indicates a better fit. Finally, the chi-square difference test revealed that the simplified model was not different from the general "log" model at a significance level of 0.05. This result implied that the additional parameters in the complex model could justifiably be rejected, which also suggested that the simplified model should be selected.
+
+```{r coxph3, echo=F}
+dat.coxph3 <- coxph(Surv(t, dead) ~ strata(cell) + log(kps), data=dat)
+```
+
+```{r anova, echo=F, results="asis"}
+options(digits=2)
+a <- anova(dat.coxph2, dat.coxph3)
+
+flas <- sapply(list(dat.coxph2,dat.coxph3), 
+               function(x) paste(deparse(x$formula, width.cutoff=500)))
+
+rownames(a) <- c("Log model", paste("Simplified model: ", flas[2]))  # add formulas as rownames
+
+a$AIC = c(extractAIC(dat.coxph2)[2], extractAIC(dat.coxph3)[2])
+
+print(xtable(a, caption="Analysis-of-deviance table comparing the general log model (first model) to the optimized model from backward elimination. loglik = Log-likelihood, Chisq=Chi-square value, Df = degrees of freedom. AIC index was used a model quality criterion to select the optimized model.", label="anova_cox", digits=2), comment=F, caption.placement = "top", table.placement="H")
+```
+
+In the same vein as the "log" model, the simplified submodel was statistically significant, and the Karnofsky factor remained a strong predictor albeit its log-transformation (Table \ref{tab::cox3}). What's more, the differences in survival between cancer types in the "full" model  (Table \ref{tab::cox1}) were also observable in the survival curves of the simplified log model, shown in Figure \ref{fig::survfit3}. Combining these results, one could argue that squamous- and large-cell cancer patients generally showed better survival than veterans with adenocarcinoma and small-cell lung cancer. At last, the proportional hazards assumption was verified, with a higher global p-value than previous models (p = 0.22) (Table \ref{tab::cox3_zph}).
+
+```{r survfit3, echo=F,  fig.align="center", fig.height = 2.5, fig.width = 4, fig.cap = "\\label{fig::survfit3} Estimated survival curves of the simplified log model for each strata (i.e. for each cancer type). Adeno=Adenocarcinoma.", fig.scap = NA}
+dat.survfit3 <- survfit(dat.coxph3)
+anova.survfit3 <- anova(dat.coxph3)
+plot.survfit3 <- autoplot(dat.survfit3)
+plot.survfit3 <- plot.survfit3 + ylab("P(survival)") + annotate(geom="text", x = 750, y = 0.5, 
+                                                                label=paste("p =", toString(signif(anova.survfit3['Pr(>|Chi|)'][[1]][2], digits=2)))) + annotate(geom="text", x = 750, y = 0.4, label='paste(chi, "² = ", 35.51, ", df = ", 1)', parse=T)
+plot.survfit3
+```
+\vspace*{-\baselineskip}
+
+\begin{table}[!htbp] \centering 
+  \caption{Summary of Cox regression fitting of the simplified log model. For the unique covariate of this model (KPS), estimated coefficient $\hat{\beta}$ and its 95\% confidence interval are respectively displayed.} 
+  \label{tab::cox3} 
+\begin{tabular}{@{\extracolsep{5pt}}lcccc} 
+\\[-1.8ex]\hline 
+\hline
+\\[-1.8ex] & $\hat{\beta}$ & $SE(\hat{\beta})$ & $z$ & $Pr(>|z|)$\\ 
+\hline \\[-1.8ex] 
+ log(KPS) & $-$1.43 & 0.22 & $-$6.41 & 1.46e-10 *** \\ 
+\hline \\[-1.8ex] 
+Observations & 137 & &  &\\ 
+Wald Test (df = 1) & 41.09$^{***}$ &  &  & \\ 
+LR Test (df = 1) & 35.51$^{***}$ &  & &  \\ 
+Score (Logrank) Test (df = 1) & 46.93$^{***}$ &  & & \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{4}{r}{$^{*}$p$<$0.1; $^{**}$p$<$0.05; $^{***}$p$<$0.01}
+\end{tabular} 
+\end{table}
+
+```{r cox3_zph, echo=F, results="asis"}
+dat.zph3 <- cox.zph(dat.coxph3)
+log.zph = as.data.frame(dat.zph3$table)
+log.zph$df = as.character(log.zph$df)
+print(xtable(log.zph, digits=2, caption="Chi-square test of proportional hazards assumption of the simplified log model. Null hypothesis: the variable (or model) is time-invariant. chisq=Chi-square value, df=number of degrees of freedom, p=p-value.", label="tab::cox3_zph"), comment=F, caption.placement = "top", table.placement="htbp")
+```
+
+# Discussion
+This project aimed at analysing the survival of lung cancer patients when treated with a standard or a test chemotherapy. Estimation of the survival function with the Kaplan-Meier estimator revealed that no significant difference appeared between the standard and test therapies following a log-rank test (where the null hypothesis is that both groups follow the same hazard function). Using Cox multivariate regression to model the hazard function, there was also no statistical evidence that these treatments differed in terms of survival time. Among the registered risk factors in this dataset, only the Karnofsky Performance Score and, to some extent, the cell type, were statistically significant. To verify the proportional hazards assumption, the cell type covariate was stratified whereas continuous variables were log-transformed. Using backward elimination, the best stratified model for Cox regression only comprised the log-transformed Karnofsky index. As a matter of fact, other risk factors (including the therapy mode) increased model complexity while not significantly improving the goodness-of-fit. With that in mind, according to the estimated coefficient for KPS in Table \ref{tab::cox3}, the optimal model from this project could be summarized by Equation \ref{eq::final}:
+
+\vspace{-1mm}
+\begin{equation} \label{eq::final}
+  h(t) = h_{0}(t) \exp(-1.43 \log(\text{KPS})) = h_{0}(t) \text{KPS}^{-1.43},
+\end{equation}
+
+where $h$ and $h_{0}$ are defined as in Equation \ref{eq:coxph}.
+
+
+That said, the fact that KPS had a strong impact for low survival times (Figure \ref{fig:hellooo}) could motivate the use of accelerated failure time models, which assume time-varying effects of covariates. Given that the population in this dataset only consisted of male patients, trials including female cancer would enable a more meaningful comparison of the two treatments. Further research could also include other socioeconomic risk factors such as smoking, which is still by far the main cause of lung cancer [@degroot2018]. 
+
+# References
